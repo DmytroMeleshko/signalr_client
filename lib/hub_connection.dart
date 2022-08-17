@@ -3,16 +3,38 @@ import 'dart:async';
 import 'package:logging/logging.dart';
 import 'package:tuple/tuple.dart';
 
+import 'default_reconnect_policy.dart';
 import 'errors.dart';
 import 'handshake_protocol.dart';
 import 'iconnection.dart';
 import 'ihub_protocol.dart';
 import 'iretry_policy.dart';
 import 'utils.dart';
-import 'default_reconnect_policy.dart';
 
 const int DEFAULT_TIMEOUT_IN_MS = 30 * 1000;
 const int DEFAULT_PING_INTERVAL_IN_MS = 15 * 1000;
+
+/// internal class to wrap emitting events once the {@link HubConnectionState} changes.
+class _HubConnectionStateMaintainer {
+  late StreamController<HubConnectionState> _hubConnectionStateStreamController;
+  late HubConnectionState _connectionState;
+
+  _HubConnectionStateMaintainer(HubConnectionState initialConnectionState) {
+    _hubConnectionStateStreamController =
+    StreamController<HubConnectionState>.broadcast();
+    _connectionState = initialConnectionState;
+  }
+
+  set hubConnectionState(HubConnectionState hubConnectionState) {
+    _connectionState = hubConnectionState;
+    _hubConnectionStateStreamController.add(_connectionState);
+  }
+
+  HubConnectionState get hubConnectionState => _connectionState;
+
+  Stream<HubConnectionState> get hubConnectionStateStream =>
+      _hubConnectionStateStreamController.stream;
+}
 
 /// Describes the current state of the {@link HubConnection} to the server.
 enum HubConnectionState {
@@ -61,7 +83,12 @@ class HubConnection {
   Completer? _handshakeCompleter;
   Exception? _stopDuringStartError;
 
-  HubConnectionState? _connectionState;
+  late final _HubConnectionStateMaintainer _hubConnectionStateMaintainer;
+  HubConnectionState get _connectionState =>
+      _hubConnectionStateMaintainer.hubConnectionState;
+  set _connectionState(HubConnectionState hubConnectionState) {
+    _hubConnectionStateMaintainer.hubConnectionState = hubConnectionState;
+  }
 
   // connectionStarted is tracked independently from connectionState, so we can check if the
   // connection ever did successfully transition from connecting to connected before disconnecting.
@@ -92,6 +119,10 @@ class HubConnection {
 
   /// Indicates the state of the {@link HubConnection} to the server.
   HubConnectionState? get state => _connectionState;
+
+  /// Emits upon changes of the {@link HubConnectionState}.
+  Stream<HubConnectionState> get stateStream =>
+      _hubConnectionStateMaintainer.hubConnectionStateStream;
 
   /// Represents the connection id of the {@link HubConnection} on the server. The connection id will be null when the connection is either
   /// in the disconnected state or if the negotiation step was skipped.
@@ -144,7 +175,8 @@ class HubConnection {
     _reconnectedCallbacks = [];
     _invocationId = 0;
     _receivedHandshakeResponse = false;
-    _connectionState = HubConnectionState.Disconnected;
+    _hubConnectionStateMaintainer =
+        _HubConnectionStateMaintainer(HubConnectionState.Disconnected);
     _connectionStarted = false;
 
     _cachedPingMessage = _protocol.writeMessage(PingMessage());
@@ -191,7 +223,7 @@ class HubConnection {
 
     try {
       final handshakeRequest =
-          HandshakeRequestMessage(_protocol.name, _protocol.version);
+      HandshakeRequestMessage(_protocol.name, _protocol.version);
 
       _logger?.finer("Sending handshake request.");
 
@@ -300,13 +332,13 @@ class HubConnection {
   Stream<Object?> stream(String methodName, List<Object> args) {
     final t = _replaceStreamingParams(args);
     final invocationDescriptor =
-        _createStreamInvocation(methodName, args, t.item2);
+    _createStreamInvocation(methodName, args, t.item2);
 
     late Future<void> promiseQueue;
     final StreamController streamController = StreamController<Object?>(
       onCancel: () {
         final cancelInvocation =
-            _createCancelInvocation(invocationDescriptor.invocationId);
+        _createCancelInvocation(invocationDescriptor.invocationId);
         _callbacks.remove(invocationDescriptor.invocationId);
 
         return promiseQueue.then((_) => _sendWithProtocol(cancelInvocation));
@@ -367,7 +399,7 @@ class HubConnection {
     args = args ?? [];
     final t = _replaceStreamingParams(args);
     final sendPromise =
-        _sendWithProtocol(_createInvocation(methodName, args, true, t.item2));
+    _sendWithProtocol(_createInvocation(methodName, args, true, t.item2));
 
     _launchStreams(t.item1, sendPromise);
     return sendPromise;
@@ -387,7 +419,7 @@ class HubConnection {
     args = args ?? [];
     final t = _replaceStreamingParams(args);
     final invocationDescriptor =
-        _createInvocation(methodName, args, false, t.item2);
+    _createInvocation(methodName, args, false, t.item2);
 
     final completer = Completer<Object?>();
 
@@ -417,7 +449,7 @@ class HubConnection {
     };
 
     final promiseQueue =
-        _sendWithProtocol(invocationDescriptor).catchError((e) {
+    _sendWithProtocol(invocationDescriptor).catchError((e) {
       if (!completer.isCompleted) completer.completeError(e);
       // invocationId will always have a value for a non-blocking invocation
       _callbacks.remove(invocationDescriptor.invocationId);
@@ -531,7 +563,7 @@ class HubConnection {
           case MessageType.Completion:
             final invocationMsg = message as HubInvocationMessage;
             final void Function(HubMessageBase, Exception?)? callback =
-                _callbacks[invocationMsg.invocationId];
+            _callbacks[invocationMsg.invocationId];
             if (callback != null) {
               if (message.type == MessageType.Completion) {
                 _callbacks.remove(invocationMsg.invocationId);
@@ -540,7 +572,7 @@ class HubConnection {
             }
             break;
           case MessageType.Ping:
-            // Don't care about pings
+          // Don't care about pings
             break;
           case MessageType.Close:
             _logger?.info("Close message received from server.");
@@ -548,7 +580,7 @@ class HubConnection {
 
             final Exception? error = closeMessage.error != null
                 ? GeneralError(
-                    "Server returned an error on close: " + closeMessage.error!)
+                "Server returned an error on close: " + closeMessage.error!)
                 : null;
 
             if (closeMessage.allowReconnect == true) {
@@ -615,17 +647,17 @@ class HubConnection {
     _cleanupPingTimer();
     _pingServerTimer =
         Timer.periodic(Duration(milliseconds: keepAliveIntervalInMilliseconds),
-            (Timer t) async {
-      if (_connectionState == HubConnectionState.Connected) {
-        try {
-          await _sendMessage(_cachedPingMessage);
-        } catch (e) {
-          // We don't care about the error. It should be seen elsewhere in the client.
-          // The connection is probably in a bad or closed state now, cleanup the timer so it stops triggering
-          _cleanupPingTimer();
-        }
-      }
-    });
+                (Timer t) async {
+              if (_connectionState == HubConnectionState.Connected) {
+                try {
+                  await _sendMessage(_cachedPingMessage);
+                } catch (e) {
+                  // We don't care about the error. It should be seen elsewhere in the client.
+                  // The connection is probably in a bad or closed state now, cleanup the timer so it stops triggering
+                  _cleanupPingTimer();
+                }
+              }
+            });
   }
 
   void _resetTimeoutPeriod() {
@@ -726,7 +758,7 @@ class HubConnection {
         : GeneralError("Attempting to reconnect due to a unknown error.");
 
     var nextRetryDelay =
-        _getNextRetryDelay(previousReconnectAttempts++, 0, retryError);
+    _getNextRetryDelay(previousReconnectAttempts++, 0, retryError);
 
     if (nextRetryDelay == null) {
       _logger?.finer(
@@ -887,7 +919,7 @@ class HubConnection {
             _sendWithProtocol(_createStreamItemMessage(i.toString(), item)));
       }, onDone: () {
         promiseQueue = promiseQueue?.then(
-            (_) => _sendWithProtocol(_createCompletionMessage(i.toString())));
+                (_) => _sendWithProtocol(_createCompletionMessage(i.toString())));
       }, onError: (err) {
         String message;
         if (err is Exception) {
@@ -925,7 +957,6 @@ class HubConnection {
   }
 
   /// isObservable
-
   StreamInvocationMessage _createStreamInvocation(
       String methodName, List<Object> args, List<String> streamIds) {
     final invocationId = _invocationId;
